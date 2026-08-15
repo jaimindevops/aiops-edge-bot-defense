@@ -1,0 +1,28 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Azure & Bicep
+*.azure
+*.bicep.json
+.azure/
+
+# Python & AI Agents
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.env
+.env*
+
+# Kubernetes & Logs
+*.log
+kubeconfig*
+*.pem
+*.key
+*.crt
+
+# Observability
+observability/secrets/
