@@ -4,46 +4,46 @@ metadata:
   name: netflex-smart-gateway
   namespace: netflex-origin
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
-    nginx.ingress.kubernetes.io/limit-rps: "5"
-    nginx.ingress.kubernetes.io/limit-connections: "10"
-    # SSL Offloading & HTTP/2
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    # Compression Offload
-    nginx.ingress.kubernetes.io/enable-gzip: "true"
-    nginx.ingress.kubernetes.io/gzip-types: "text/plain text/css application/json application/javascript"
-    # Edge Telemetry & Caching Headers
-    nginx.ingress.kubernetes.io/custom-response-headers: |
-      X-Edge-Defense: Active-AIOps-Gemma2B
-      X-Cache-Engine: Redis-Edge-Accelerated
-      X-SSL-Offload: True-Terminated-At-Edge
+    cert-manager.io/cluster-issuer: 'letsencrypt-prod'
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+    nginx.ingress.kubernetes.io/proxy-body-size: '100m'
+    nginx.ingress.kubernetes.io/proxy-read-timeout: '600'
+    nginx.ingress.kubernetes.io/proxy-send-timeout: '600'
 spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - edge.netflex.internal
-    secretName: netflex-edge-tls
+    - netflex-stream-6787.canadacentral.cloudapp.azure.com
+    secretName: netflex-prod-tls
   rules:
-  - http:
+  - host: netflex-stream-6787.canadacentral.cloudapp.azure.com
+    http:
       paths:
-      - path: /stream
+      - path: /
         pathType: Prefix
         backend:
           service:
-            name: video-service
+            name: netflex-portal
+            port:
+              number: 8080
+      - path: /api/media
+        pathType: Prefix
+        backend:
+          service:
+            name: netflex-portal
+            port:
+              number: 8080
+      - path: /admin-trap
+        pathType: Prefix
+        backend:
+          service:
+            name: honeypot-trap
             port:
               number: 80
       - path: /api/auth
         pathType: Prefix
         backend:
           service:
-            name: auth-service
-            port:
-              number: 80
-      - path: /admin-trap
-        pathType: Prefix
-        backend:
-          service:
-            name: honeypot-service
+            name: auth-api
             port:
               number: 80

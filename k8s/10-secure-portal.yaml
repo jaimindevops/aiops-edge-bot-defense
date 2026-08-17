@@ -1,0 +1,237 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-app
+  namespace: netflex-origin
+data:
+  app.py: |-
+    import os, secrets
+    from flask import Flask, request, jsonify, render_template_string, Response, make_response, send_file
+
+    app = Flask(__name__)
+    app.secret_key = secrets.token_hex(32)
+
+    # 3 Dedicated Test User Credentials
+    USERS = {
+        "alice": "Alice@NetFlex2026!",
+        "bob": "Bob@NetFlex2026!",
+        "guest": "Guest@NetFlex2026!"
+    }
+
+    ACTIVE_SESSIONS = {}
+    MEDIA_PATH = "/media/video.mp4"
+
+    HTML_TEMPLATE = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>NetFlex | Private Stream</title>
+      <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        body { background-color: #141414; color: #fff; display: flex; flex-direction: column; min-height: 100vh; align-items: center; justify-content: center; }
+        header { position: absolute; top: 20px; left: 30px; font-size: 26px; font-weight: 900; color: #E50914; letter-spacing: 2px; }
+        .card { background: rgba(0,0,0,0.85); padding: 40px; border-radius: 12px; width: 100%; max-width: 450px; border: 1px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.7); }
+        .title { font-size: 24px; font-weight: 700; margin-bottom: 25px; }
+        .input-group { margin-bottom: 20px; }
+        label { display: block; font-size: 12px; text-transform: uppercase; color: #aaa; margin-bottom: 8px; }
+        input { width: 100%; padding: 14px; border-radius: 6px; border: 1px solid #444; background: #222; color: #fff; font-size: 15px; }
+        input:focus { outline: none; border-color: #E50914; }
+        button { width: 100%; padding: 14px; background: #E50914; border: none; border-radius: 6px; color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        button:hover { background: #b80710; }
+        .error { color: #E50914; font-size: 13px; margin-top: 15px; display: none; text-align: center; }
+        .player-container { display: none; width: 100%; max-width: 800px; text-align: center; }
+        video { width: 100%; border-radius: 10px; border: 1px solid #333; box-shadow: 0 10px 40px rgba(0,0,0,0.9); }
+        .user-badge { display: inline-block; padding: 6px 14px; background: #222; border-radius: 20px; font-size: 13px; margin-bottom: 20px; border: 1px solid #444; color: #46d369; font-weight: bold; }
+        .btn-logout { background: transparent; border: 1px solid #555; color: #aaa; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin-top: 20px; font-size: 13px; }
+        .btn-logout:hover { color: #fff; border-color: #aaa; }
+      </style>
+    </head>
+    <body oncontextmenu="return false;">
+      <header>NETFLEX</header>
+
+      <div id="loginCard" class="card">
+        <h1 class="title">Sign In to Stream</h1>
+        <div class="input-group">
+          <label>Username</label>
+          <input type="text" id="username" placeholder="Enter username" autocomplete="off" />
+        </div>
+        <div class="input-group">
+          <label>Access Password</label>
+          <input type="password" id="password" placeholder="Enter password" />
+        </div>
+        <button onclick="login()">Enter Stream</button>
+        <div id="errorMsg" class="error">Invalid credentials or unauthorized device.</div>
+      </div>
+
+      <div id="playerView" class="player-container">
+        <div class="user-badge" id="userBadge">✅ AUTHENTICATED: Authorized Streamer</div>
+        <br>
+        <video id="streamPlayer" controls controlsList="nodownload noplaybackrate" disablePictureInPicture playsinline width="100%">
+          Your browser does not support video playback.
+        </video>
+        <br>
+        <button class="btn-logout" onclick="logout()">Sign Out</button>
+      </div>
+
+      <script>
+        function playStream(username) {
+          document.getElementById('loginCard').style.display = 'none';
+          document.getElementById('playerView').style.display = 'block';
+          document.getElementById('userBadge').innerText = '✅ AUTHENTICATED: ' + username;
+          const vid = document.getElementById('streamPlayer');
+          vid.src = '/api/media/stream';
+          vid.load();
+          vid.play().catch(()=>{});
+        }
+
+        async function login() {
+          const u = document.getElementById('username').value.trim();
+          const p = document.getElementById('password').value.trim();
+          const err = document.getElementById('errorMsg');
+          err.style.display = 'none';
+
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username: u, password: p})
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            playStream(data.user);
+          } else {
+            err.style.display = 'block';
+          }
+        }
+
+        async function logout() {
+          await fetch('/api/logout', {method: 'POST'});
+          location.reload();
+        }
+
+        // Auto-check existing session on page load
+        fetch('/api/session').then(res => {
+          if (res.ok) {
+            res.json().then(data => playStream(data.user));
+          }
+        });
+      </script>
+    </body>
+    </html>
+    """
+
+    @app.route('/')
+    def index():
+        return render_template_string(HTML_TEMPLATE)
+
+    @app.route('/api/login', methods=['POST'])
+    def login():
+        data = request.get_json() or {}
+        user = data.get("username")
+        pwd = data.get("password")
+
+        if user in USERS and USERS[user] == pwd:
+            token = secrets.token_hex(24)
+            ACTIVE_SESSIONS[token] = user
+            resp = make_response(jsonify({"status": "authenticated", "user": user}))
+            resp.set_cookie("netflex_session", token, httponly=True, samesite="Lax")
+            return resp
+        return jsonify({"error": "Unauthorized"}), 401
+
+    @app.route('/api/session')
+    def check_session():
+        token = request.cookies.get("netflex_session")
+        if token and token in ACTIVE_SESSIONS:
+            return jsonify({"status": "active", "user": ACTIVE_SESSIONS[token]})
+        return jsonify({"status": "unauthenticated"}), 401
+
+    @app.route('/api/logout', methods=['POST'])
+    def logout():
+        token = request.cookies.get("netflex_session")
+        if token in ACTIVE_SESSIONS:
+            del ACTIVE_SESSIONS[token]
+        resp = make_response(jsonify({"status": "logged_out"}))
+        resp.delete_cookie("netflex_session")
+        return resp
+
+    @app.route('/api/media/stream')
+    def stream_media():
+        token = request.cookies.get("netflex_session")
+        ua = request.headers.get("User-Agent", "").lower()
+
+        # 1. Anti-Curl / Anti-Terminal Scraper Verification
+        if not token or token not in ACTIVE_SESSIONS:
+            return Response("⛔ 401 Unauthorized: Valid browser session cookie required.", status=401)
+
+        if any(bot in ua for bot in ["curl", "wget", "python", "httpie", "postman", "aiohttp"]):
+            return Response("⛔ 403 Forbidden: Direct script scraping is prohibited.", status=403)
+
+        if not os.path.exists(MEDIA_PATH):
+            return Response("Video file initializing...", status=404)
+
+        # 2. Native RFC 7233 Byte-Range Streaming (Smooth RAM playback for Chrome & Safari)
+        resp = send_file(MEDIA_PATH, mimetype="video/mp4", conditional=True)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
+
+    if __name__ == "__main__":
+        app.run(host="0.0.0.0", port=8080)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netflex-portal
+  namespace: netflex-origin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netflex-portal
+  template:
+    metadata:
+      labels:
+        app: netflex-portal
+    spec:
+      containers:
+      - name: portal
+        image: python:3.11-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          pip install --no-cache-dir flask
+          mkdir -p /media
+          python3 /app/app.py
+        volumeMounts:
+        - name: app-code
+          mountPath: /app
+        - name: media-storage
+          mountPath: /media
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "250Mi"
+          requests:
+            cpu: "50m"
+            memory: "100Mi"
+      volumes:
+      - name: app-code
+        configMap:
+          name: portal-app
+      - name: media-storage
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netflex-portal
+  namespace: netflex-origin
+spec:
+  selector:
+    app: netflex-portal
+  ports:
+  - port: 8080
+    targetPort: 8080
