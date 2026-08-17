@@ -1,0 +1,49 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: netflex-smart-gateway
+  namespace: netflex-origin
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/limit-rps: "5"
+    nginx.ingress.kubernetes.io/limit-connections: "10"
+    # SSL Offloading & HTTP/2
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    # Compression Offload
+    nginx.ingress.kubernetes.io/enable-gzip: "true"
+    nginx.ingress.kubernetes.io/gzip-types: "text/plain text/css application/json application/javascript"
+    # Edge Telemetry & Caching Headers
+    nginx.ingress.kubernetes.io/custom-response-headers: |
+      X-Edge-Defense: Active-AIOps-Gemma2B
+      X-Cache-Engine: Redis-Edge-Accelerated
+      X-SSL-Offload: True-Terminated-At-Edge
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - edge.netflex.internal
+    secretName: netflex-edge-tls
+  rules:
+  - http:
+      paths:
+      - path: /stream
+        pathType: Prefix
+        backend:
+          service:
+            name: video-service
+            port:
+              number: 80
+      - path: /api/auth
+        pathType: Prefix
+        backend:
+          service:
+            name: auth-service
+            port:
+              number: 80
+      - path: /admin-trap
+        pathType: Prefix
+        backend:
+          service:
+            name: honeypot-service
+            port:
+              number: 80

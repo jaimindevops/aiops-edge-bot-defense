@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-api
+  namespace: netflex-origin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: video-api
+  template:
+    metadata:
+      labels:
+        app: video-api
+    spec:
+      containers:
+      - name: video-server
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text={\"status\":\"200\",\"service\":\"origin-video-stream\",\"bitrate\":\"4K-UHD\"}"
+        ports:
+        - containerPort: 5678
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "32Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-service
+  namespace: netflex-origin
+spec:
+  ports:
+  - port: 80
+    targetPort: 5678
+  selector:
+    app: video-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-api
+  namespace: netflex-origin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth-api
+  template:
+    metadata:
+      labels:
+        app: auth-api
+    spec:
+      containers:
+      - name: auth-server
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text={\"status\":\"authenticated\",\"session\":\"token-valid\"}"
+        ports:
+        - containerPort: 5678
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "32Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: netflex-origin
+spec:
+  ports:
+  - port: 80
+    targetPort: 5678
+  selector:
+    app: auth-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: honeypot-trap
+  namespace: netflex-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: honeypot-trap
+  template:
+    metadata:
+      labels:
+        app: honeypot-trap
+    spec:
+      containers:
+      - name: trap-server
+        image: hashicorp/http-echo:0.2.3
+        args:
+        - "-text={\"alert\":\"SUSPICIOUS_ACTOR_CAPTURED_IN_HONEYPOT\"}"
+        ports:
+        - containerPort: 5678
+        resources:
+          requests:
+            cpu: "20m"
+            memory: "16Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: honeypot-service
+  namespace: netflex-edge
+spec:
+  ports:
+  - port: 80
+    targetPort: 5678
+  selector:
+    app: honeypot-trap

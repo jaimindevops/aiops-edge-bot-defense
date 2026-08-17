@@ -1,0 +1,170 @@
+{
+  "editable": true,
+  "liveNow": true,
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "aiops",
+    "f5-defense"
+  ],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "title": "NetFlex AIOps Edge Defense & Delivery Dashboard",
+  "uid": "netflex-aiops-dash",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Gateway Ingested Requests",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum(netflex_http_requests_total) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Malicious IPs Remediated (403 Block)",
+      "type": "stat",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum(netflex_ips_blocked_total) or vector(0)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Threat Vector Breakdown",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "sum by (threat_type) (netflex_threats_detected_total)",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "\ud83e\udd16 Gemma-2B Real-Time AI Security Triage Feed",
+      "type": "table",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus"
+          },
+          "expr": "netflex_security_incident_info",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true,
+              "instance": true,
+              "job": true,
+              "Value": true,
+              "Time": true
+            },
+            "indexByName": {
+              "timestamp": 0,
+              "client_ip": 1,
+              "threat_type": 2,
+              "confidence": 3,
+              "target_path": 4,
+              "reasoning": 5
+            },
+            "renameByName": {
+              "timestamp": "Timestamp (UTC)",
+              "client_ip": "Client IP",
+              "threat_type": "Threat Vector",
+              "confidence": "AI Confidence",
+              "target_path": "Target Endpoint",
+              "reasoning": "Gemma LLM Reasoning"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

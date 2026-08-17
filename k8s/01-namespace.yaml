@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netflex-edge
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netflex-origin
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netflex-aiops
