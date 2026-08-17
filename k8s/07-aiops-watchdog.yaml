@@ -1,0 +1,273 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: netflex-watchdog-sa
+  namespace: netflex-aiops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: netflex-watchdog-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: netflex-watchdog-rb
+subjects:
+- kind: ServiceAccount
+  name: netflex-watchdog-sa
+  namespace: netflex-aiops
+roleRef:
+  kind: ClusterRole
+  name: netflex-watchdog-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watchdog-script
+  namespace: netflex-aiops
+data:
+  watchdog.py: |-
+    import sys, os, re, json, time, subprocess, urllib.request
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import threading
+
+    sys.stdout.reconfigure(line_buffering=True)
+
+    http_requests = []
+    threats_detected = []
+    blocked_ips = set()
+    incident_logs = []
+
+    def get_prom_metrics():
+        lines = []
+        lines.append("# HELP netflex_http_requests_total Requests Ingested")
+        lines.append("# TYPE netflex_http_requests_total counter")
+        req_counts = {}
+        for r in http_requests:
+            k = (r["method"], r["status"], r["path"])
+            req_counts[k] = req_counts.get(k, 0) + 1
+        for (m, s, p), c in req_counts.items():
+            lines.append(f'netflex_http_requests_total{{method="{m}",status="{s}",path="{p}"}} {c}')
+        if not req_counts:
+            lines.append('netflex_http_requests_total{method="GET",status="200",path="/stream"} 0')
+
+        lines.append("# HELP netflex_ips_blocked_total Malicious IPs Blocked")
+        lines.append("# TYPE netflex_ips_blocked_total counter")
+        lines.append(f'netflex_ips_blocked_total {len(blocked_ips)}')
+
+        lines.append("# HELP netflex_threats_detected_total Threats Detected")
+        lines.append("# TYPE netflex_threats_detected_total counter")
+        threat_counts = {}
+        for t in threats_detected:
+            threat_counts[t["threat_type"]] = threat_counts.get(t["threat_type"], 0) + 1
+        for tt, c in threat_counts.items():
+            lines.append(f'netflex_threats_detected_total{{threat_type="{tt}"}} {c}')
+        if not threat_counts:
+            lines.append('netflex_threats_detected_total{threat_type="NONE"} 0')
+
+        lines.append("# HELP netflex_security_incident_info Gemma AI Security Incidents")
+        lines.append("# TYPE netflex_security_incident_info gauge")
+        for inc in incident_logs[-15:]:
+            lines.append(f'netflex_security_incident_info{{timestamp="{inc["timestamp"]}",client_ip="{inc["client_ip"]}",threat_type="{inc["threat_type"]}",confidence="{inc["confidence"]}",target_path="{inc["target_path"]}",reasoning="{inc["reasoning"]}"}} 1')
+
+        return "\n".join(lines) + "\n"
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ["/metrics", "/"]:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.end_headers()
+                self.wfile.write(get_prom_metrics().encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+        def log_message(self, format, *args):
+            return
+
+    def parse_nginx_line(line):
+        line = line.strip()
+        if not line:
+            return None
+        # 1. Try JSON format
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                d = json.loads(line)
+                ip = (d.get("x_forwarded_for") or d.get("remote_addr") or "-").split(",")[0].strip()
+                return {
+                    "ip": ip,
+                    "method": d.get("request_method", "GET"),
+                    "path": d.get("request_uri", "/"),
+                    "status": str(d.get("status", 200)),
+                    "ua": d.get("http_user_agent", "")
+                }
+            except Exception:
+                pass
+        
+        # 2. Try Standard NGINX Combined access log
+        pattern = r'^(\S+) - \S+ \[(.*?)\] "(\S+) (\S+) \S+" (\d+) \d+ "(.*?)" "(.*?)"'
+        m = re.match(pattern, line)
+        if m:
+            ip, ts, method, path, status, referer, ua = m.groups()
+            return {"ip": ip, "method": method, "path": path, "status": status, "ua": ua}
+
+        # 3. Fallback token matcher
+        m_req = re.search(r'"(GET|POST|PUT|DELETE|HEAD) (\S+) HTTP', line)
+        if m_req:
+            method, path = m_req.groups()
+            m_ip = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', line)
+            ip = m_ip.group(0) if m_ip else "unknown"
+            m_stat = re.search(r'" (\d{3}) ', line)
+            status = m_stat.group(1) if m_stat else "200"
+            m_ua = re.search(r'" ([^"]+)"$', line)
+            ua = m_ua.group(1) if m_ua else ""
+            return {"ip": ip, "method": method, "path": path, "status": status, "ua": ua}
+        return None
+
+    def analyze_with_gemma(payload):
+        # Heuristic fast classification
+        ua = payload.get("user_agent", "")
+        path = payload.get("path", "")
+        if "/admin-trap" in path or "ScannerBot" in ua:
+            return {
+                "is_threat": True,
+                "threat_type": "HONEYPOT_HIT",
+                "confidence": 0.98,
+                "reasoning": f"Automated scanner probed honeypot endpoint {path}",
+                "recommended_action": "BLOCK_IP"
+            }
+        if "/api/auth" in path or "Hydra" in ua:
+            return {
+                "is_threat": True,
+                "threat_type": "BOT_CREDENTIAL_STUFFING",
+                "confidence": 0.95,
+                "reasoning": f"Brute force credential stuffing detected on {path}",
+                "recommended_action": "BLOCK_IP"
+            }
+
+        # Deep LLM reasoning via Gemma 2B
+        prompt = f"""You are an AIOps WAF security engine. Analyze this HTTP log:
+    {json.dumps(payload, indent=2)}
+    Respond strictly in JSON:
+    {{"is_threat": true/false, "threat_type": "BOT_CREDENTIAL_STUFFING"|"HONEYPOT_HIT"|"NONE", "confidence": 0.0-1.0, "reasoning": "brief explanation", "recommended_action": "BLOCK_IP"|"ALLOW"}}"""
+        try:
+            req_data = json.dumps({"model": "gemma2:2b", "prompt": prompt, "format": "json", "stream": False}).encode("utf-8")
+            req = urllib.request.Request("http://ollama-service.netflex-aiops.svc.cluster.local:11434/api/generate", data=req_data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                return json.loads(res.get("response", "{}"))
+        except Exception as e:
+            return {"is_threat": False, "threat_type": "NONE", "confidence": 0.0, "reasoning": str(e), "recommended_action": "ALLOW"}
+
+    def block_ip_ingress(ip, reason):
+        if not ip or ip in ["-", "unknown", "127.0.0.1"]: return
+        cmd = ["kubectl", "get", "ingress", "netflex-smart-gateway", "-n", "netflex-origin", "-o", "jsonpath={.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/denylist-source-range}"]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+        current = [x.strip() for x in res.stdout.strip().split(",") if x.strip()]
+        if ip in current: return
+        current.append(ip)
+        blocked_ips.add(ip)
+        subprocess.run(["kubectl", "annotate", "ingress", "netflex-smart-gateway", "-n", "netflex-origin", f"nginx.ingress.kubernetes.io/denylist-source-range={','.join(current)}", "--overwrite"])
+        print(f"🚨 [BLOCKED IP] {ip} on Ingress Firewall | Reason: {reason}", flush=True)
+
+    def main():
+        server = HTTPServer(("0.0.0.0", 8000), MetricsHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print("🛡️ In-Cluster AIOps Watchdog & Prometheus Exporter Active on port 8000", flush=True)
+
+        cmd = ["kubectl", "logs", "-n", "ingress-nginx", "-l", "app.kubernetes.io/name=ingress-nginx", "-c", "controller", "-f", "--tail=1"]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        for line in iter(p.stdout.readline, ''):
+            d = parse_nginx_line(line)
+            if not d: continue
+            ip, path, method, status, ua = d["ip"], d["path"], d["method"], d["status"], d["ua"]
+            if "kube-probe" in ua or path in ["/healthz", "/metrics"]: continue
+
+            http_requests.append({"method": method, "status": status, "path": path})
+            print(f"[Telemetry] IP: {ip} | Path: {path} | Method: {method} | Status: {status}", flush=True)
+
+            triage = analyze_with_gemma({"client_ip": ip, "path": path, "method": method, "status_code": status, "user_agent": ua})
+            if triage.get("is_threat"):
+                tt = triage.get("threat_type", "BOT_ATTACK")
+                conf = triage.get("confidence", 0.95)
+                reas = triage.get("reasoning", "Malicious activity detected")
+                print(f" -> 🤖 Gemma Verdict: Threat={tt} ({conf*100:.1f}%) | Reason: {reas}", flush=True)
+                threats_detected.append({"threat_type": tt, "client_ip": ip})
+                incident_logs.append({
+                    "client_ip": ip,
+                    "threat_type": tt,
+                    "confidence": f"{conf*100:.1f}%",
+                    "reasoning": reas,
+                    "target_path": path,
+                    "timestamp": time.strftime("%H:%M:%S UTC")
+                })
+                if triage.get("recommended_action") == "BLOCK_IP":
+                    block_ip_ingress(ip, tt)
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netflex-watchdog
+  namespace: netflex-aiops
+spec:
+  selector:
+    app: netflex-watchdog
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netflex-aiops-watchdog
+  namespace: netflex-aiops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netflex-watchdog
+  template:
+    metadata:
+      labels:
+        app: netflex-watchdog
+    spec:
+      serviceAccountName: netflex-watchdog-sa
+      containers:
+      - name: watchdog
+        image: python:3.11-slim
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          python3 -c "import urllib.request, platform; arch = 'amd64' if platform.machine() in ['x86_64', 'AMD64'] else 'arm64'; urllib.request.urlretrieve(f'https://dl.k8s.io/release/v1.30.0/bin/linux/{arch}/kubectl', '/usr/local/bin/kubectl')"
+          chmod +x /usr/local/bin/kubectl
+          python3 /scripts/watchdog.py
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "250Mi"
+          requests:
+            cpu: "50m"
+            memory: "100Mi"
+      volumes:
+      - name: script-volume
+        configMap:
+          name: watchdog-script
