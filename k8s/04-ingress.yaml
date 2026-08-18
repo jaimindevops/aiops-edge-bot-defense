@@ -4,11 +4,16 @@ metadata:
   name: netflex-smart-gateway
   namespace: netflex-origin
   annotations:
-    cert-manager.io/cluster-issuer: 'letsencrypt-prod'
-    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
-    nginx.ingress.kubernetes.io/proxy-body-size: '100m'
-    nginx.ingress.kubernetes.io/proxy-read-timeout: '600'
-    nginx.ingress.kubernetes.io/proxy-send-timeout: '600'
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    # TIER 1 HARD RULES: Block Scraper CLI Tools & Enforce Edge Drops
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      if ($http_user_agent ~* (curl|wget|python|httpie|nikto|sqlmap|nmap|postman)) {
+        return 403 "⛔ 403 Forbidden: Automated CLI tools and scrapers are strictly blocked by NetFlex Edge WAF.\n";
+      }
 spec:
   ingressClassName: nginx
   tls:
@@ -19,6 +24,7 @@ spec:
   - host: netflex-stream-6787.canadacentral.cloudapp.azure.com
     http:
       paths:
+      # Production Media & Portal
       - path: /
         pathType: Prefix
         backend:
@@ -33,6 +39,7 @@ spec:
             name: netflex-portal
             port:
               number: 8080
+      # TIER 2: DMZ AI Sandbox & Honeypot Traps
       - path: /admin-trap
         pathType: Prefix
         backend:
@@ -40,10 +47,10 @@ spec:
             name: honeypot-trap
             port:
               number: 80
-      - path: /api/auth
+      - path: /sandbox-probe
         pathType: Prefix
         backend:
           service:
-            name: auth-api
+            name: honeypot-trap
             port:
               number: 80

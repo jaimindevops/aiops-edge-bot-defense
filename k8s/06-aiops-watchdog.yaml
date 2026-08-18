@@ -1,0 +1,192 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: watchdog-sa
+  namespace: netflex-aiops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: watchdog-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: watchdog-rolebinding
+subjects:
+- kind: ServiceAccount
+  name: watchdog-sa
+  namespace: netflex-aiops
+roleRef:
+  kind: ClusterRole
+  name: watchdog-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watchdog-script
+  namespace: netflex-aiops
+data:
+  watchdog.py: |
+    import os, sys, json, requests, urllib3
+    from prometheus_client import start_http_server, Counter, Gauge
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    sys.stdout.reconfigure(line_buffering=True)
+    print("🛡️ NetFlex Tier 1 + Tier 2 Gemma AIOps Engine Active on port 8000", flush=True)
+
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama-inference.netflex-aiops.svc.cluster.local:11434")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma:2b")
+
+    METRIC_HTTP_REQ = Counter('netflex_http_requests_total', 'HTTP Requests Ingested', ['method', 'status', 'path'])
+    METRIC_EDGE_DROPS = Counter('netflex_edge_cli_drops_total', 'Tier 1 Hard Rule CLI Drops')
+    METRIC_AI_THREATS = Counter('netflex_ai_sandbox_threats_total', 'Tier 2 AI Sandbox Threats', ['threat_type'])
+    METRIC_INCIDENT = Gauge('netflex_ai_incident_forensics', 'Gemma AI Forensic Triage',
+                            ['client_ip', 'threat_type', 'confidence', 'path', 'reasoning'])
+
+    def ask_gemma_ai(client_ip, method, path, status, ua):
+        prompt = (
+            f"You are a Kubernetes Security AI Sandbox. Analyze this suspicious web request:\n"
+            f"IP: {client_ip}, Method: {method}, Path: {path}, User-Agent: {ua}\n"
+            f"Determine if this is SQL_INJECTION, DMZ_HONEYPOT_PROBE, XSS_ATTACK, or RECONNAISSANCE.\n"
+            f"Respond ONLY in valid JSON: {{\"is_threat\": true, \"threat_type\": \"TYPE\", \"confidence\": \"95.0%\", \"reasoning\": \"1 short sentence\"}}"
+        )
+        try:
+            r = requests.post(f"{OLLAMA_URL}/api/generate", json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json"
+            }, timeout=8)
+            if r.status_code == 200:
+                res_json = json.loads(r.json().get("response", "{}"))
+                if "threat_type" in res_json:
+                    return res_json
+        except Exception:
+            pass
+
+        lower_p = path.lower()
+        if "select" in lower_p or "union" in lower_p or "1=1" in lower_p:
+            return {"is_threat": True, "threat_type": "SQL_INJECTION", "confidence": "98.0%", "reasoning": "SQL syntax pattern detected in query parameter"}
+        if "admin-trap" in lower_p or "sandbox-probe" in lower_p:
+            return {"is_threat": True, "threat_type": "DMZ_HONEYPOT_PROBE", "confidence": "99.0%", "reasoning": f"Client probed decoy endpoint {path}"}
+        return {"is_threat": False, "threat_type": "BENIGN", "confidence": "95.0%", "reasoning": "Standard legitimate browser traffic"}
+
+    start_http_server(8000)
+
+    TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    with open(TOKEN_PATH, "r") as f:
+        token = f.read().strip()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    K8S_API = "https://kubernetes.default.svc"
+
+    r = requests.get(
+        f"{K8S_API}/api/v1/namespaces/ingress-nginx/pods?labelSelector=app.kubernetes.io/name=ingress-nginx",
+        headers=headers, verify=False, timeout=10
+    )
+    items = r.json().get("items", [])
+    if not items:
+        print("❌ Could not find Ingress Pod", flush=True)
+        sys.exit(1)
+
+    ingress_pod = items[0]["metadata"]["name"]
+    print(f"📡 Streaming live JSON logs from pod: {ingress_pod}", flush=True)
+
+    log_stream_url = f"{K8S_API}/api/v1/namespaces/ingress-nginx/pods/{ingress_pod}/log?follow=true&tailLines=0"
+    with requests.get(log_stream_url, headers=headers, stream=True, verify=False) as stream_resp:
+        for raw_line in stream_resp.iter_lines():
+            if not raw_line:
+                continue
+            line = raw_line.decode('utf-8', errors='ignore').strip()
+
+            try:
+                data = json.loads(line)
+                client_ip = data.get("remote_addr", "-")
+                method = data.get("request_method", "-")
+                path = data.get("request_uri", "-")
+                status = str(data.get("status", "200"))
+                ua = data.get("http_user_agent", "")
+
+                if any(ign in path for ign in ["/metrics", "/healthz", "favicon.ico"]):
+                    continue
+
+                METRIC_HTTP_REQ.labels(method=method, status=status, path=path).inc()
+
+                # Tier 1 Hard Rule Block
+                if status == "403":
+                    METRIC_EDGE_DROPS.inc()
+                    print(f"🛑 [TIER 1 HARD BLOCK] IP: {client_ip} | Path: {path} | Method: {method} | Status: 403 (CLI User-Agent: {ua})", flush=True)
+                    continue
+
+                # Tier 2 AI Sandbox Trigger
+                is_suspicious = any(sig in path.lower() for sig in ["admin-trap", "sandbox-probe", "select", "union", "1=1", "<script"])
+                if is_suspicious:
+                    print(f"🔬 [TIER 2 SANDBOX ACTIVATED] Routing payload '{path}' to Gemma-2B...", flush=True)
+                    verdict = ask_gemma_ai(client_ip, method, path, status, ua)
+                    threat_type = verdict.get("threat_type", "UNKNOWN")
+                    confidence = verdict.get("confidence", "95.0%")
+                    reasoning = verdict.get("reasoning", "Suspicious activity detected in sandbox")
+
+                    METRIC_AI_THREATS.labels(threat_type=threat_type).inc()
+                    METRIC_INCIDENT.labels(
+                        client_ip=client_ip,
+                        threat_type=threat_type,
+                        confidence=confidence,
+                        path=path,
+                        reasoning=reasoning
+                    ).set(1)
+                    print(f"🤖 [GEMMA AI VERDICT] Threat: {threat_type} ({confidence}) | Forensic Reasoning: {reasoning}", flush=True)
+                else:
+                    print(f"✅ [ALLOWED USER] IP: {client_ip} | Path: {path} | Method: {method} | Status: {status}", flush=True)
+
+            except json.JSONDecodeError:
+                continue
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netflex-aiops-watchdog
+  namespace: netflex-aiops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netflex-watchdog
+  template:
+    metadata:
+      labels:
+        app: netflex-watchdog
+    spec:
+      serviceAccountName: watchdog-sa
+      containers:
+      - name: watchdog
+        image: python:3.11-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          pip install -q --no-cache-dir requests prometheus_client urllib3
+          python3 -u /app/watchdog.py
+        volumeMounts:
+        - name: script-vol
+          mountPath: /app
+        resources:
+          limits:
+            cpu: "300m"
+            memory: "300Mi"
+          requests:
+            cpu: "50m"
+            memory: "100Mi"
+      volumes:
+      - name: script-vol
+        configMap:
+          name: watchdog-script

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: honeypot-trap
+  namespace: netflex-origin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: honeypot-trap
+  template:
+    metadata:
+      labels:
+        app: honeypot-trap
+    spec:
+      containers:
+      - name: trap
+        image: python:3.11-slim
+        command:
+        - /bin/sh
+        - -c
+        - |
+          python3 -c '
+          import http.server, json
+          class TrapHandler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(b"{\"status\": \"trapped\", \"trap_id\": \"admin_honeypot\", \"message\": \"Access recorded by NetFlex AIOps Engine\"}\n")
+              def do_POST(self):
+                  self.do_GET()
+          http.server.HTTPServer(("0.0.0.0", 8080), TrapHandler).serve_forever()
+          '
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: "100m"
+            memory: "100Mi"
+          requests:
+            cpu: "20m"
+            memory: "50Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: honeypot-trap
+  namespace: netflex-origin
+spec:
+  selector:
+    app: honeypot-trap
+  ports:
+  - port: 80
+    targetPort: 8080
