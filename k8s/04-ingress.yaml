@@ -9,11 +9,15 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "100m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
-    # TIER 1 HARD RULES: Block Scraper CLI Tools & Enforce Edge Drops
+    # TIER 1: HARD CLI BLOCK
     nginx.ingress.kubernetes.io/configuration-snippet: |
       if ($http_user_agent ~* (curl|wget|python|httpie|nikto|sqlmap|nmap|postman)) {
         return 403 "⛔ 403 Forbidden: Automated CLI tools and scrapers are strictly blocked by NetFlex Edge WAF.\n";
       }
+    # TIER 1.5: STRICT L7 RATE LIMITING (1 req/sec, burst 1)
+    nginx.ingress.kubernetes.io/limit-rps: "1"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "1"
+    nginx.ingress.kubernetes.io/limit-connections: "5"
 spec:
   ingressClassName: nginx
   tls:
@@ -24,7 +28,6 @@ spec:
   - host: netflex-stream-6787.canadacentral.cloudapp.azure.com
     http:
       paths:
-      # Production Media & Portal
       - path: /
         pathType: Prefix
         backend:
@@ -39,7 +42,6 @@ spec:
             name: netflex-portal
             port:
               number: 8080
-      # TIER 2: DMZ AI Sandbox & Honeypot Traps
       - path: /admin-trap
         pathType: Prefix
         backend:

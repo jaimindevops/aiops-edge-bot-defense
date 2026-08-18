@@ -41,7 +41,7 @@ data:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     sys.stdout.reconfigure(line_buffering=True)
-    print("🛡️ NetFlex Real-Time AIOps Dual-Channel Notification Engine Active", flush=True)
+    print("🛡️ NetFlex Multi-Tier AIOps & Anti-DDoS Watchdog Active", flush=True)
 
     OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama-inference.netflex-aiops.svc.cluster.local:11434")
     OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma:2b")
@@ -49,17 +49,25 @@ data:
 
     METRIC_HTTP_REQ = Counter('netflex_http_requests_total', 'HTTP Requests Ingested', ['method', 'status', 'path'])
     METRIC_EDGE_DROPS = Counter('netflex_edge_cli_drops_total', 'Tier 1 Hard Rule CLI Drops')
+    METRIC_RATE_LIMITS = Counter('netflex_l7_rate_limits_total', 'L7 Rate Limit Drops')
     METRIC_AI_THREATS = Counter('netflex_ai_sandbox_threats_total', 'Tier 2 AI Sandbox Threats', ['threat_type'])
 
+    last_rate_limit_alert = 0
+
     def send_slack_alert(tier, client_ip, method, path, threat_type, details):
-        """Sends rich alert card strictly for BLOCKED threat events"""
         if not SLACK_URL or not SLACK_URL.startswith("http"):
-            print("⚠️ No SLACK_WEBHOOK_URL configured", flush=True)
+            print("⚠️ SLACK_URL not configured", flush=True)
             return
 
-        is_tier1 = "Tier 1" in tier
-        color = "#FFA500" if is_tier1 else "#E50914"
-        title = "🚨 [NETFLEX EDGE WAF: IP DROPPED]" if is_tier1 else "🔬 [NETFLEX AI SANDBOX: THREAT QUARANTINED]"
+        if "Rate Limit" in tier:
+            color = "#800080" # Purple
+            title = "⚡ [NETFLEX L7 WAF: RATE LIMIT EXCEEDED]"
+        elif "Tier 1" in tier:
+            color = "#FFA500" # Orange
+            title = "🚨 [NETFLEX EDGE WAF: IP DROPPED]"
+        else:
+            color = "#E50914" # Red
+            title = "🔬 [NETFLEX AI SANDBOX: THREAT QUARANTINED]"
 
         payload = {
             "text": f"{title} - {threat_type} ({client_ip})",
@@ -69,10 +77,10 @@ data:
                     "title": title,
                     "fields": [
                         {"title": "Defense Layer", "value": tier, "short": True},
-                        {"title": "Threat Classification", "value": threat_type, "short": True},
+                        {"title": "Classification", "value": threat_type, "short": True},
                         {"title": "Source IP", "value": f"`{client_ip}`", "short": True},
                         {"title": "Target Endpoint", "value": f"`{method} {path}`", "short": True},
-                        {"title": "Forensics / Rule Trigger", "value": details, "short": False}
+                        {"title": "Trigger / Forensics", "value": details, "short": False}
                     ],
                     "footer": "NetFlex Cloud-Native Security Engine | Azure Canada Central",
                     "ts": int(time.time())
@@ -82,21 +90,11 @@ data:
         try:
             r = requests.post(SLACK_URL, json=payload, timeout=4)
             if r.status_code == 200:
-                print(f"📬 [SLACK SENT] Dispatched card to #netflex-secure-ops for IP: {client_ip}", flush=True)
+                print(f"📬 [SLACK SENT] Dispatched {threat_type} alert to #netflex-secure-ops", flush=True)
             else:
-                print(f"⚠️ Slack response: {r.status_code} - {r.text}", flush=True)
+                print(f"⚠️ Slack response: {r.status_code}", flush=True)
         except Exception as e:
-            print(f"⚠️ Slack dispatch error: {e}", flush=True)
-
-    # 1. Send Startup Beacon to Slack
-    if SLACK_URL:
-        try:
-            requests.post(SLACK_URL, json={
-                "text": "🟢 *NetFlex SecOps Watchdog Online*: Live monitoring attached to Ingress Gateway. Ready for threat mitigation."
-            }, timeout=4)
-            print("📬 Startup beacon sent to Slack channel", flush=True)
-        except Exception as e:
-            print(f"⚠️ Startup beacon error: {e}", flush=True)
+            print(f"⚠️ Slack Alert dispatch error: {e}", flush=True)
 
     def ask_gemma_ai(client_ip, method, path, status, ua):
         prompt = (
@@ -161,14 +159,24 @@ data:
 
                 METRIC_HTTP_REQ.labels(method=method, status=status, path=path).inc()
 
-                # TIER 1 HARD BLOCK (403 Drops)
+                # 1. TIER 1 HARD BLOCK (403 Drops)
                 if status == "403":
                     METRIC_EDGE_DROPS.inc()
                     print(f"🛑 [TIER 1 HARD BLOCK] IP: {client_ip} | Path: {path} | User-Agent: {ua}", flush=True)
                     send_slack_alert("Tier 1 Ingress Edge WAF", client_ip, method, path, "CLI_BOT_SCRAPER", f"Blocked automated tool User-Agent: `{ua}`")
                     continue
 
-                # TIER 2 AI SANDBOX
+                # 2. TIER 1.5 RATE LIMITING & DDOS (429 or 503 Drops)
+                if status in ["429", "503"]:
+                    METRIC_RATE_LIMITS.inc()
+                    print(f"⚡ [RATE LIMIT {status}] IP: {client_ip} | Path: {path}", flush=True)
+                    now = time.time()
+                    if (now - last_rate_limit_alert) > 5:
+                        last_rate_limit_alert = now
+                        send_slack_alert("Layer 7 Token-Bucket Limiter", client_ip, method, path, "HTTP_FLOOD_BURST", f"Exceeded rate threshold (Status {status}). Client IP temporarily throttled.")
+                    continue
+
+                # 3. TIER 2 AI SANDBOX
                 is_suspicious = any(sig in path.lower() for sig in ["admin-trap", "sandbox-probe", "select", "union", "1=1", "<script"])
                 if is_suspicious:
                     verdict = ask_gemma_ai(client_ip, method, path, status, ua)
@@ -177,7 +185,7 @@ data:
                     reasoning = verdict.get("reasoning", "Decoy endpoint probe flagged in sandbox")
 
                     METRIC_AI_THREATS.labels(threat_type=threat_type).inc()
-                    print(f"�� [TIER 2 SANDBOX VERDICT] Threat: {threat_type} ({confidence}) | IP: {client_ip}", flush=True)
+                    print(f"🤖 [TIER 2 SANDBOX VERDICT] Threat: {threat_type} ({confidence}) | IP: {client_ip}", flush=True)
                     send_slack_alert("Tier 2 Cognitive AI Sandbox", client_ip, method, path, f"{threat_type} ({confidence})", reasoning)
                 else:
                     print(f"✅ [ALLOWED USER] IP: {client_ip} | Path: {path} | Status: 200", flush=True)
