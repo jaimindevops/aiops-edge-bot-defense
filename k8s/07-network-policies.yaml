@@ -1,0 +1,138 @@
+# ====================================================================
+# 1. CORE SYSTEM RULES: Allow DNS lookups across netflex-origin
+# ====================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: netflex-origin
+spec:
+  podSelector:
+    matchLabels:
+      app: netflex-portal
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# ====================================================================
+# 2. NETFLEX-ORIGIN: Isolate Portal & Strictly Quarantine Honeypot DMZ
+# ====================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: netflex-portal-policy
+  namespace: netflex-origin
+spec:
+  podSelector:
+    matchLabels:
+      app: netflex-portal
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow Ingress strictly from Ingress-NGINX
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow Egress to Redis Edge Cache in netflex-edge namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: netflex-edge
+      podSelector:
+        matchLabels:
+          app: redis-edge-cache
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow DNS resolution
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: honeypot-dmz-quarantine
+  namespace: netflex-origin
+spec:
+  podSelector:
+    matchLabels:
+      app: honeypot-trap
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Honeypot accepts traffic ONLY forwarded from Ingress Gateway
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80
+  # Total Egress Denial: Honeypot cannot resolve DNS, connect to Redis, or beacon to C2 servers
+  egress: []
+---
+# ====================================================================
+# 3. NETFLEX-EDGE: Protect Redis Cache from Unauthorized Namespaces
+# ====================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-cache-protection
+  namespace: netflex-edge
+spec:
+  podSelector:
+    matchLabels:
+      app: redis-edge-cache
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow access ONLY from netflex-portal in netflex-origin namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: netflex-origin
+      podSelector:
+        matchLabels:
+          app: netflex-portal
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+# ====================================================================
+# 4. NETFLEX-AIOPS: Protect Gemma-2B LLM Engine (Watchdog access only)
+# ====================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-llm-isolation
+  namespace: netflex-aiops
+spec:
+  podSelector:
+    matchLabels:
+      app: ollama-inference
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow inference calls strictly from the internal watchdog
+  - from:
+    - podSelector:
+        matchLabels:
+          app: netflex-watchdog
+    ports:
+    - protocol: TCP
+      port: 11434
