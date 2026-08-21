@@ -18,6 +18,8 @@
 ```
 
 ```
+<img width="956" height="520" alt="image" src="https://github.com/user-attachments/assets/2beab75e-854b-4732-8881-72b34a3abf15" />
+
                                   [ Incoming Public Web Traffic ]
                                                  │
                                                  ▼
@@ -206,5 +208,3 @@ curl -i -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
 EOF
 
 ```
-
----
